@@ -11,6 +11,18 @@ use crate::{
     models::{GetEventsResult, RpcResponse, SorobanEvent},
 };
 
+#[derive(Debug, thiserror::Error)]
+enum IndexerFetchError {
+    #[error("{0}")]
+    Rpc(String),
+    #[error(transparent)]
+    DbConnection(#[from] sqlx::Error),
+}
+
+fn is_connection_class_db_error(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::PoolTimedOut | sqlx::Error::Io(_))
+}
+
 pub struct Indexer {
     pool: PgPool,
     client: Client,
@@ -28,6 +40,7 @@ impl Indexer {
 
     pub async fn run(&self) {
         let mut current_ledger = self.config.start_ledger;
+        let mut consecutive_db_errors = 0u32;
 
         if current_ledger == 0 {
             current_ledger = self.get_latest_ledger().await.unwrap_or(1);
@@ -37,14 +50,32 @@ impl Indexer {
         loop {
             match self.fetch_and_store_events(current_ledger).await {
                 Ok(latest) => {
+                    consecutive_db_errors = 0;
                     if latest > current_ledger {
                         current_ledger = latest;
                     } else {
                         sleep(Duration::from_secs(5)).await;
                     }
                 }
-                Err(e) => {
-                    error!("Indexer error: {}", e);
+                Err(IndexerFetchError::DbConnection(e)) => {
+                    consecutive_db_errors += 1;
+                    let backoff_secs = if consecutive_db_errors >= 5 {
+                        60
+                    } else {
+                        10
+                    };
+                    if consecutive_db_errors == 5 {
+                        error!(
+                            consecutive = consecutive_db_errors,
+                            "DB unavailable, backing off"
+                        );
+                    } else if consecutive_db_errors < 5 {
+                        error!("Indexer error: {e}");
+                    }
+                    sleep(Duration::from_secs(backoff_secs)).await;
+                }
+                Err(IndexerFetchError::Rpc(msg)) => {
+                    error!("Indexer error: {}", msg);
                     sleep(Duration::from_secs(10)).await;
                 }
             }
@@ -74,7 +105,7 @@ impl Indexer {
             .ok_or_else(|| "Missing sequence".to_string())
     }
 
-    async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<u64, String> {
+    async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<u64, IndexerFetchError> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -92,10 +123,10 @@ impl Indexer {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?
             .json()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?;
 
         let result = match resp.result {
             Some(r) => r,

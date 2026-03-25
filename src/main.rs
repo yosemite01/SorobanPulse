@@ -8,6 +8,7 @@ mod models;
 mod routes;
 
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -21,12 +22,31 @@ async fn main() {
         .init();
 
     let config = config::Config::from_env();
-    let pool = db::create_pool(
-        &config.database_url,
-        config.db_max_connections,
-        config.db_min_connections,
-    )
-    .await;
+    
+    let pool = {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match db::create_pool(
+                &config.database_url,
+                config.db_max_connections,
+                config.db_min_connections,
+            )
+            .await
+            {
+                Ok(p) => break p,
+                Err(e) => {
+                    if attempt >= 3 {
+                        tracing::error!("Failed to connect to database after 3 attempts: {}", e);
+                        std::process::exit(1);
+                    }
+                    tracing::warn!(attempt = attempt, "DB connection failed, retrying...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    };
+    
     db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");

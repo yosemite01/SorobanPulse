@@ -14,6 +14,7 @@ pub struct Config {
     pub db_min_connections: u32,
     pub behind_proxy: bool,
     pub allowed_origins: Vec<String>,
+    pub rate_limit_per_minute: u32,
 }
 
 fn validate_rpc_url(raw: &str) -> String {
@@ -102,6 +103,10 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            rate_limit_per_minute: env::var("RATE_LIMIT_PER_MINUTE")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .expect("RATE_LIMIT_PER_MINUTE must be a positive integer"),
         }
     }
 }

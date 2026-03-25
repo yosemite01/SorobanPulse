@@ -53,31 +53,23 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!("Allowed CORS origins: {:?}", config.allowed_origins);
-    let router = routes::create_router(pool, config.api_key, &config.allowed_origins);
+    info!("Rate limit: {} requests/minute per IP", config.rate_limit_per_minute);
+    let router = routes::create_router(pool, config.api_key, &config.allowed_origins, config.rate_limit_per_minute);
 
     info!("Soroban Pulse listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
-    if config.behind_proxy {
-        info!("Running behind proxy — trusting X-Forwarded-For");
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx_axum.changed().await;
-        })
-        .await
-        .unwrap();
-    } else {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx_axum.changed().await;
-            })
-            .await
-            .unwrap();
-    }
+    // GovernorLayer requires connect_info to extract peer IP — always use it.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx_axum.changed().await;
+    })
+    .await
+    .unwrap();
 
     let _ = indexer_handle.await;
 }

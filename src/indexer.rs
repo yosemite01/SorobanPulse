@@ -32,9 +32,15 @@ pub struct Indexer {
 
 impl Indexer {
     pub fn new(pool: PgPool, config: Config, shutdown_rx: tokio::sync::watch::Receiver<bool>) -> Self {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
+            .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
+            .build()
+            .expect("Failed to build HTTP client");
+
         Self {
             pool,
-            client: Client::new(),
+            client,
             config,
             shutdown_rx,
         }
@@ -125,7 +131,15 @@ impl Indexer {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        timeout_secs = self.config.rpc_request_timeout_secs,
+                        "RPC request timeout"
+                    );
+                }
+                e.to_string()
+            })?
             .json()
             .await
             .map_err(|e| e.to_string())?;
@@ -153,7 +167,15 @@ impl Indexer {
             .json(&body)
             .send()
             .await
-            .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    warn!(
+                        timeout_secs = self.config.rpc_request_timeout_secs,
+                        "RPC request timeout"
+                    );
+                }
+                IndexerFetchError::Rpc(e.to_string())
+            })?
             .json()
             .await
             .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?;

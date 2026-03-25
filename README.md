@@ -47,8 +47,13 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 |-------------------|--------------------------------------|------------------------------------------|
 | `DATABASE_URL`    | PostgreSQL connection string         | required                                 |
 | `STELLAR_RPC_URL` | Soroban RPC endpoint                 | `https://soroban-testnet.stellar.org`    |
+| `DB_MAX_CONNECTIONS` | Max number of connections in the Postgres pool | `10` |
+| `DB_MIN_CONNECTIONS` | Min number of connections in the Postgres pool | `1` |
 | `START_LEDGER`    | Ledger to start indexing from (0 = latest) | `0`                               |
 | `PORT`            | HTTP server port                     | `3000`                                   |
+| `API_KEY`         | Optional key for API authentication  | (disabled)                               |
+
+> **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
 
 ### 3. Run with Docker Compose (easiest)
 
@@ -98,7 +103,7 @@ Returns paginated events across all contracts.
 Returns all events for a specific contract.
 
 ### `GET /events/tx/{tx_hash}`
-Returns all events from a specific transaction.
+Returns all events from a specific transaction. If nothing has been indexed for that hash yet (including valid on-chain transactions that emitted no Soroban events), the response is **200 OK** with an empty `"data"` array — not **404**.
 
 ## How It Works
 

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws"] }
+# Re-enable axum "ws" when implementing SSE/WebSocket (tracked in issue #83).
+axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json"] }
 serde = { version = "1", features = ["derive"] }
@@ -16,8 +17,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 thiserror = "1"
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors"] }
-tokio-tungstenite = "0.21"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 anyhow = "1.0.102"

@@ -3,6 +3,7 @@ mod db;
 mod error;
 mod handlers;
 mod indexer;
+mod middleware;
 mod models;
 mod routes;
 
@@ -20,19 +21,37 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = config::Config::from_env();
-    let pool = db::create_pool(&config.database_url).await;
+    let pool = db::create_pool(
+        &config.database_url,
+        config.db_max_connections,
+        config.db_min_connections,
+    )
+    .await;
     db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut shutdown_rx_axum = shutdown_rx.clone();
+
     // Spawn background indexer
-    let indexer = indexer::Indexer::new(pool.clone(), config.clone());
-    tokio::spawn(async move {
+    let indexer = indexer::Indexer::new(pool.clone(), config.clone(), shutdown_rx);
+    let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });
 
+    tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+        tracing::info!("Shutdown signal received");
+        let _ = shutdown_tx.send(true);
+    });
+
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    let router = routes::create_router(pool);
+    let router = routes::create_router(pool, config.api_key);
 
     info!("Soroban Pulse listening on {}", addr);
 
@@ -47,12 +66,16 @@ async fn main() -> anyhow::Result<()> {
             listener,
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx_axum.changed().await;
+        })
         .await
         .map_err(|e| {
             error!("{}", e);
             e
         })?;
     } else {
+ fix/graceful-startup-errors
         axum::serve(listener, router).await.map_err(|e| {
             error!("{}", e);
             e
@@ -60,4 +83,15 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx_axum.changed().await;
+            })
+            .await
+            .unwrap();
+    }
+
+    let _ = indexer_handle.await;
+ main
 }

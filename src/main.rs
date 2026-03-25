@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     
-    db::run_migrations(&pool).await;
+    let _ = db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");
     info!("Soroban RPC URL: {}", config.stellar_rpc_url);
@@ -83,35 +83,17 @@ async fn main() -> anyhow::Result<()> {
         e
     })?;
 
-    if config.behind_proxy {
-        info!("Running behind proxy — trusting X-Forwarded-For");
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx_axum.changed().await;
-        })
-        .await
-        .map_err(|e| {
-            error!("{}", e);
-            e
-        })?;
-    } else {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx_axum.changed().await;
-        })
-        .await
-        .map_err(|e| {
-            error!("{}", e);
-            e
-        })?;
-    }
+    info!("Running server - trusting X-Forwarded-For: {}", config.behind_proxy);
 
+    // GovernorLayer requires connect_info to extract peer IP — always use it.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx_axum.changed().await;
+    })
+    .await?;
     let _ = indexer_handle.await;
 
     Ok(())

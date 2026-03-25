@@ -19,8 +19,21 @@ enum IndexerFetchError {
     DbConnection(#[from] sqlx::Error),
 }
 
+/*
 fn is_connection_class_db_error(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::PoolTimedOut | sqlx::Error::Io(_))
+}
+*/
+
+fn build_rpc_client(config: &Config) -> Client {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
+        .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
+        .pool_max_idle_per_host(5)
+        .pool_idle_timeout(Duration::from_secs(30))
+        .tcp_keepalive(Duration::from_secs(60))
+        .build()
+        .expect("Failed to build HTTP client")
 }
 
 pub struct Indexer {
@@ -32,11 +45,7 @@ pub struct Indexer {
 
 impl Indexer {
     pub fn new(pool: PgPool, config: Config, shutdown_rx: tokio::sync::watch::Receiver<bool>) -> Self {
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
-            .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
-            .build()
-            .expect("Failed to build HTTP client");
+        let client = build_rpc_client(&config);
 
         Self {
             pool,
@@ -150,71 +159,89 @@ impl Indexer {
     }
 
     async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<u64, IndexerFetchError> {
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getEvents",
-            "params": {
-                "startLedger": start_ledger,
+        let mut cursor: Option<String> = None;
+        let mut latest_ledger = start_ledger;
+        let mut total_fetched = 0;
+        let mut total_inserted = 0;
+        let mut total_skipped = 0;
+
+        loop {
+            let mut params = json!({
                 "filters": [],
                 "pagination": { "limit": 100 }
+            });
+
+            if let Some(c) = &cursor {
+                params["pagination"]["cursor"] = json!(c);
+            } else {
+                params["startLedger"] = json!(start_ledger);
             }
-        });
 
-        let resp: RpcResponse<GetEventsResult> = self
-            .client
-            .post(&self.config.stellar_rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    warn!(
-                        timeout_secs = self.config.rpc_request_timeout_secs,
-                        "RPC request timeout"
-                    );
-                }
-                IndexerFetchError::Rpc(e.to_string())
-            })?
-            .json()
-            .await
-            .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?;
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getEvents",
+                "params": params
+            });
 
-        let result = match resp.result {
-            Some(r) => r,
-            None => return Ok(start_ledger),
-        };
+            let resp: RpcResponse<GetEventsResult> = self
+                .client
+                .post(&self.config.stellar_rpc_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        warn!(
+                            timeout_secs = self.config.rpc_request_timeout_secs,
+                            "RPC request timeout"
+                        );
+                    }
+                    IndexerFetchError::Rpc(e.to_string())
+                })?
+                .json()
+                .await
+                .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?;
 
-        let latest = result.latest_ledger;
-        let total = result.events.len();
-        let mut new = 0;
-        let mut skipped = 0;
+            let result = match resp.result {
+                Some(r) => r,
+                None => break,
+            };
 
-        for event in result.events {
-            match self.store_event(&event).await {
-                Ok(rows) => {
-                    new += rows;
-                    if rows == 0 {
-                        skipped += 1;
+            latest_ledger = result.latest_ledger;
+            let current_count = result.events.len();
+            total_fetched += current_count;
+
+            for event in result.events {
+                match self.store_event(&event).await {
+                    Ok(rows) => {
+                        total_inserted += rows;
+                        if rows == 0 {
+                            total_skipped += 1;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to store event {}: {}", event.tx_hash, e);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to store event {}: {}", event.tx_hash, e);
-                }
+            }
+
+            cursor = result.rpc_cursor;
+            if cursor.is_none() {
+                break;
             }
         }
 
         info!(
-            fetched = total,
-            inserted = new,
-            ledger = latest,
+            fetched = total_fetched,
+            inserted = total_inserted,
+            ledger = latest_ledger,
             "Indexed ledger range"
         );
 
-        // TODO(#42): Add a duplicate_events_skipped counter to the future metrics endpoint
-        let _duplicate_events_skipped = skipped;
+        let _duplicate_events_skipped = total_skipped;
 
-        Ok(latest + 1)
+        Ok(latest_ledger + 1)
     }
     async fn store_event(&self, event: &SorobanEvent) -> Result<u64, sqlx::Error> {
         let ledger = match i64::try_from(event.ledger) {
@@ -225,7 +252,7 @@ impl Indexer {
             }
         };
 
-        let timestamp = chrono::DateTime::parse_from_rfc3339(&event.ledger_closed_at)
+        let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
 
@@ -274,5 +301,102 @@ mod tests {
     #[test]
     fn ledger_overflow_returns_err() {
         assert!(i64::try_from(make_event(u64::MAX).ledger).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_and_store_events_pagination() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        let page1_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "events": [
+                    {
+                        "contractId": "C1",
+                        "type": "contract",
+                        "txHash": "hash1",
+                        "ledger": 100,
+                        "ledgerClosedAt": "2026-03-24T00:00:00Z",
+                        "value": null,
+                        "topic": null
+                    }
+                ],
+                "latestLedger": 100,
+                "cursor": "next-page-cursor"
+            }
+        });
+
+        let page2_response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "events": [
+                    {
+                        "contractId": "C1",
+                        "type": "contract",
+                        "txHash": "hash2",
+                        "ledger": 100,
+                        "ledgerClosedAt": "2026-03-24T00:00:00Z",
+                        "value": null,
+                        "topic": null
+                    }
+                ],
+                "latestLedger": 100,
+                "cursor": null
+            }
+        });
+
+        let _m1 = server.mock("POST", "/")
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getEvents",
+                "params": {
+                    "startLedger": 100,
+                    "filters": [],
+                    "pagination": { "limit": 100 }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(page1_response.to_string())
+            .create_async().await;
+
+        let _m2 = server.mock("POST", "/")
+            .match_body(mockito::Matcher::Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getEvents",
+                "params": {
+                    "filters": [],
+                    "pagination": {
+                        "cursor": "next-page-cursor",
+                        "limit": 100
+                    }
+                }
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(page2_response.to_string())
+            .create_async().await;
+
+        let config = crate::config::Config {
+            stellar_rpc_url: url,
+            ..Default::default()
+        };
+
+        // We use an empty pool which will cause store_event to fail, 
+        // but the pagination loop should still continue.
+        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let (_tx, _rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new(pool, config, _rx);
+
+        let next_ledger = indexer.fetch_and_store_events(100).await.unwrap();
+
+        assert_eq!(next_ledger, 101);
+        _m1.assert_async().await;
+        _m2.assert_async().await;
     }
 }

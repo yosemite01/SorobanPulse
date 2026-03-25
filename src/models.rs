@@ -13,6 +13,9 @@ pub struct Event {
     pub timestamp: DateTime<Utc>,
     pub event_data: Value,
     pub created_at: DateTime<Utc>,
+    #[sqlx(default)]
+    #[serde(skip)]
+    pub total_count: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +48,8 @@ pub struct GetEventsResult {
     pub events: Vec<SorobanEvent>,
     #[serde(rename = "latestLedger")]
     pub latest_ledger: u64,
+    #[serde(rename = "cursor")]
+    pub rpc_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

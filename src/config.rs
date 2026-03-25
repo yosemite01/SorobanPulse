@@ -19,6 +19,26 @@ pub struct Config {
     pub rate_limit_per_minute: u32,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            database_url: "postgres://localhost/unused".to_string(),
+            stellar_rpc_url: "http://localhost".to_string(),
+            start_ledger: 0,
+            start_ledger_fallback: false,
+            port: 3000,
+            api_key: None,
+            db_max_connections: 10,
+            db_min_connections: 1,
+            behind_proxy: false,
+            rpc_connect_timeout_secs: 5,
+            rpc_request_timeout_secs: 30,
+            allowed_origins: vec!["*".to_string()],
+            rate_limit_per_minute: 60,
+        }
+    }
+}
+
 fn validate_rpc_url(raw: &str) -> String {
     let url = Url::parse(raw)
         .unwrap_or_else(|e| panic!("STELLAR_RPC_URL is not a valid URL: {e}"));

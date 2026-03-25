@@ -30,6 +30,7 @@ async fn main() {
     db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");
+    info!("Soroban RPC URL: {}", config.stellar_rpc_url);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut shutdown_rx_axum = shutdown_rx.clone();

@@ -8,11 +8,12 @@ mod models;
 mod routes;
 
 use std::net::SocketAddr;
-use tracing::info;
+use std::time::Duration;
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::registry()
@@ -21,15 +22,34 @@ async fn main() {
         .init();
 
     let config = config::Config::from_env();
-    let pool = db::create_pool(
-        &config.database_url,
-        config.db_max_connections,
-        config.db_min_connections,
-    )
-    .await;
-    db::run_migrations(&pool).await.expect("Failed to run database migrations");
+    let pool = {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match db::create_pool(
+                &config.database_url,
+                config.db_max_connections,
+                config.db_min_connections,
+            )
+            .await
+            {
+                Ok(p) => break p,
+                Err(e) => {
+                    if attempt >= 3 {
+                        tracing::error!("Failed to connect to database after 3 attempts: {}", e);
+                        std::process::exit(1);
+                    }
+                    tracing::warn!(attempt = attempt, "DB connection failed, retrying...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+    };
+    
+    let _ = db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");
+    info!("Soroban RPC URL: {}", config.stellar_rpc_url);
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut shutdown_rx_axum = shutdown_rx.clone();
@@ -51,31 +71,31 @@ async fn main() {
     });
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    let router = routes::create_router(pool, config.api_key);
+    info!("Allowed CORS origins: {:?}", config.allowed_origins);
+    info!("Rate limit: {} requests/minute per IP", config.rate_limit_per_minute);
+    let router = routes::create_router(pool, config.api_key, &config.allowed_origins, config.rate_limit_per_minute);
 
     info!("Soroban Pulse listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        error!("Address already in use");
+        e
+    })?;
 
-    if config.behind_proxy {
-        info!("Running behind proxy — trusting X-Forwarded-For");
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx_axum.changed().await;
-        })
-        .await
-        .unwrap();
-    } else {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_rx_axum.changed().await;
-            })
-            .await
-            .unwrap();
-    }
+    info!("Running server - trusting X-Forwarded-For: {}", config.behind_proxy);
+
+    // GovernorLayer requires connect_info to extract peer IP — always use it.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx_axum.changed().await;
+    })
+    .await
+    .unwrap();
 
     let _ = indexer_handle.await;
+
+    Ok(())
 }

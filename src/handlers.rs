@@ -1,10 +1,11 @@
-use axum::{extract::{Path, Query, State}, Json};
+use axum::{extract::{Path, Query, State}, Json, response::IntoResponse};
 use serde_json::{json, Value};
 use sqlx::Row;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use metrics_exporter_prometheus::PrometheusHandle;
 
 use crate::{config::HealthState, error::AppError, models::PaginationParams};
 
@@ -104,10 +105,15 @@ pub async fn health(State(state): State<HealthCheckState>) -> (axum::http::Statu
     }
 }
 
+pub async fn metrics(State(state): State<crate::routes::AppState>) -> impl IntoResponse {
+    state.prometheus_handle.render()
+}
+
 pub async fn get_events(
-    State(state): State<AppState>,
+    State(state): State<crate::routes::AppState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
+    let pool = &state.pool;
     let limit = params.limit();
     let offset = params.offset();
     let exact = params.exact_count.unwrap_or(false);
@@ -168,10 +174,11 @@ pub async fn get_events(
 }
 
 pub async fn get_events_by_contract(
-    State(state): State<AppState>,
+    State(state): State<crate::routes::AppState>,
     Path(contract_id): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
+    let pool = &state.pool;
     validate_contract_id(&contract_id)?;
     
     let limit = params.limit();
@@ -217,10 +224,11 @@ pub async fn get_events_by_contract(
 }
 
 pub async fn get_events_by_tx(
-    State(state): State<AppState>,
+    State(state): State<crate::routes::AppState>,
     Path(tx_hash): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
+    let pool = &state.pool;
     validate_tx_hash(&tx_hash)?;
     
     let columns = params.columns();

@@ -2,11 +2,18 @@ use axum::{routing::get, Router};
 use axum::http::{HeaderValue, Method};
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::time::Instant;
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::{cors::CorsLayer, trace::TraceLayer, compression::CompressionLayer};
+use metrics_exporter_prometheus::PrometheusHandle;
 
-use crate::{config::HealthState, middleware, handlers as handlers_module};
+use crate::{handlers, middleware, metrics};
 
-pub type AppState = crate::handlers::AppState;
+#[derive(Clone)]
+pub struct AppState {
+    pub pool: PgPool,
+    pub prometheus_handle: PrometheusHandle,
+}
 
 pub fn create_router(
     pool: PgPool,
@@ -14,9 +21,11 @@ pub fn create_router(
     allowed_origins: &[String],
     rate_limit_per_minute: u32,
     health_state: Arc<HealthState>,
+    prometheus_handle: PrometheusHandle,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_key });
+    let app_state = AppState { pool, prometheus_handle };
 
     // Create app state that combines pool and health state
     let app_state = AppState {
@@ -45,13 +54,24 @@ pub fn create_router(
         .route("/events/tx/:tx_hash", get(handlers_module::get_events_by_tx));
         // .layer(GovernorLayer::new(governor_conf));
 
-    Router::<AppState>::new()
-        .route("/health", get(handlers_module::health))
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/metrics", get(handlers::metrics))
         .merge(api)
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth_middleware,
         ))
+        .layer(axum::middleware::from_fn(|req, next| async {
+            let method = req.method().as_str().to_string();
+            let route = req.uri().path().to_string();
+            let start = Instant::now();
+            let response = next.run(req).await;
+            let duration = start.elapsed();
+            let status = response.status().as_u16().to_string();
+            metrics::record_http_request_duration(duration, &method, &route, &status);
+            response
+        }))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(CompressionLayer::new())

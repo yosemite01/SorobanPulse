@@ -52,6 +52,9 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 | `START_LEDGER`    | Ledger to start indexing from (0 = latest) | `0`                               |
 | `PORT`            | HTTP server port                     | `3000`                                   |
 | `API_KEY`         | Optional key for API authentication  | (disabled)                               |
+| `RUST_LOG_FORMAT` | Log output format (`text` or `json`) | `text`                                   |
+| `INDEXER_LAG_WARN_THRESHOLD` | Indexer lag warning threshold (ledgers) | `100`                                   |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP collector endpoint (when built with `otel` feature) | `http://localhost:4317` |
 
 > **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
 
@@ -121,6 +124,45 @@ Returns all events from a specific transaction. If nothing has been indexed for 
 - The indexer polls every 5 seconds when no new ledgers are available, and 10 seconds on error.
 - `START_LEDGER=0` automatically starts from the latest ledger at boot time.
 - All endpoints return JSON. Errors include an `"error"` field with a description.
+
+## Observability
+
+### Metrics
+
+The service exposes Prometheus-compatible metrics at `GET /metrics`:
+
+- `soroban_pulse_events_indexed_total` - Total number of events indexed
+- `soroban_pulse_indexer_current_ledger` - Current ledger being processed
+- `soroban_pulse_indexer_latest_ledger` - Latest ledger from RPC
+- `soroban_pulse_indexer_lag_ledgers` - Lag between latest and current ledger
+- `soroban_pulse_rpc_errors_total` - Total RPC errors
+- `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
+
+### Distributed Tracing
+
+When built with the `otel` feature, the service supports OpenTelemetry distributed tracing:
+
+```bash
+# Build with OpenTelemetry support
+cargo build --features otel
+
+# Configure the OTLP exporter endpoint
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+
+# Run the service
+cargo run --features otel
+```
+
+Each indexer poll cycle produces a root span with child spans for RPC and DB operations, allowing you to trace latency through the system in tools like Jaeger or Honeycomb.
+
+### Structured Logging
+
+Set `RUST_LOG_FORMAT=json` to output logs in JSON format for easier parsing by log aggregation tools:
+
+```bash
+export RUST_LOG_FORMAT=json
+cargo run
+```
 
 ## Deployment
 

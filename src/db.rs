@@ -7,8 +7,9 @@ pub async fn create_pool(
     db_min_connections: u32,
 ) -> Result<PgPool, sqlx::Error> {
     info!(
-        "Configuring Postgres connection pool: min_connections={}, max_connections={}",
-        db_min_connections, db_max_connections
+        min_connections = db_min_connections,
+        max_connections = db_max_connections,
+        "Configuring Postgres connection pool"
     );
 
     PgPoolOptions::new()

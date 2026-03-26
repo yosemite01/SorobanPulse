@@ -15,14 +15,23 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = { version = "0.22", optional = true }
+opentelemetry = { version = "0.21", optional = true }
+opentelemetry-otlp = { version = "0.14", optional = true }
 dotenvy = "0.15"
 thiserror = "1"
-tower-http = { version = "0.5", features = ["trace", "cors", "compression-full"] }
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-full", "metrics"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 anyhow = "1.0.102"
 url = "2"
 tower_governor = { version = "0.8.0", features = ["axum"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
 
 [dev-dependencies]
 mockito = "1.7.2"
 tower = "0.5"
+
+[features]
+default = []
+otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]

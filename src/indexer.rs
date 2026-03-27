@@ -290,7 +290,11 @@ impl Indexer {
 
         let _duplicate_events_skipped = total_skipped;
 
-        Ok(latest_ledger + 1)
+        if latest_ledger > start_ledger {
+            Ok(latest_ledger + 1)
+        } else {
+            Ok(start_ledger)
+        }
     }
     #[instrument(skip(self, event), fields(tx_hash = %event.tx_hash, contract_id = %event.contract_id, ledger = event.ledger))]
     async fn store_event(&self, event: &SorobanEvent) -> Result<u64, anyhow::Error> {
@@ -481,5 +485,41 @@ mod tests {
         assert_eq!(next_ledger, 101);
         _m1.assert_async().await;
         _m2.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_fetch_and_store_events_no_new_ledgers() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+
+        // RPC returns latest_ledger == start_ledger (no new ledgers)
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "events": [],
+                "latestLedger": 200,
+                "cursor": null
+            }
+        });
+
+        let _m = server.mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response.to_string())
+            .create_async().await;
+
+        let config = crate::config::Config {
+            stellar_rpc_url: url,
+            ..Default::default()
+        };
+
+        let pool = PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new(pool, config, rx);
+
+        // start_ledger == latest_ledger == 200: cursor must not advance
+        let next_ledger = indexer.fetch_and_store_events(200).await.unwrap();
+        assert_eq!(next_ledger, 200);
     }
 }

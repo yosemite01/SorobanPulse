@@ -1,0 +1,13 @@
+# .clippy.toml — Project-specific Clippy configuration
+#
+# Lint enforcement is set in src/main.rs:
+#   #![deny(clippy::all, clippy::pedantic)]
+#
+# Intentional suppressions are documented below alongside their rationale.
+
+# Allow functions with many arguments — some handler/builder functions
+# legitimately require several parameters and splitting them would reduce clarity.
+too-many-arguments-threshold = 8
+
+# Allow long functions in integration-heavy modules (e.g. handlers, indexer).
+too-many-lines-threshold = 120

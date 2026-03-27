@@ -8,7 +8,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn, instrument, span, Level};
 
 use crate::{
-    config::Config,
+    config::{Config, HealthState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
 };

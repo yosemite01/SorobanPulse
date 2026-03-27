@@ -1,23 +1,11 @@
 use axum::{extract::{Path, Query, State}, Json, response::IntoResponse};
 use serde_json::{json, Value};
 use sqlx::Row;
-use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use metrics_exporter_prometheus::PrometheusHandle;
 
-use crate::{config::HealthState, error::AppError, models::PaginationParams};
-
-/// State type for the application that includes both DB pool and health state
-#[derive(Clone)]
-pub struct AppState {
-    pub pool: sqlx::PgPool,
-    pub health_state: Arc<HealthState>,
-}
-
-/// State type for health check endpoint - same as AppState
-pub type HealthCheckState = AppState;
+use crate::{error::AppError, models::PaginationParams, routes::AppState};
 
 fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     if contract_id.len() != 56 {
@@ -43,7 +31,7 @@ fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
 }
 
 /// Health check endpoint that verifies DB connectivity and indexer status
-pub async fn health(State(state): State<HealthCheckState>) -> (axum::http::StatusCode, Json<Value>) {
+pub async fn health(State(state): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let mut db_ok = true;
     let mut db_reachable = true;
 
@@ -105,12 +93,12 @@ pub async fn health(State(state): State<HealthCheckState>) -> (axum::http::Statu
     }
 }
 
-pub async fn metrics(State(state): State<crate::routes::AppState>) -> impl IntoResponse {
+pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     state.prometheus_handle.render()
 }
 
 pub async fn get_events(
-    State(state): State<crate::routes::AppState>,
+    State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
     // Validate event_type
@@ -230,11 +218,10 @@ pub async fn get_events(
 }
 
 pub async fn get_events_by_contract(
-    State(state): State<crate::routes::AppState>,
+    State(state): State<AppState>,
     Path(contract_id): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
-    let pool = &state.pool;
     validate_contract_id(&contract_id)?;
     
     let limit = params.limit();
@@ -280,11 +267,10 @@ pub async fn get_events_by_contract(
 }
 
 pub async fn get_events_by_tx(
-    State(state): State<crate::routes::AppState>,
+    State(state): State<AppState>,
     Path(tx_hash): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
-    let pool = &state.pool;
     validate_tx_hash(&tx_hash)?;
     
     let columns = params.columns();
@@ -333,7 +319,8 @@ mod tests {
 
     fn create_test_router(pool: PgPool) -> impl axum::extract::InferRouteService<AppState> {
         let health_state = Arc::new(HealthState::new(60));
-        crate::routes::create_router(pool, None, &[], 60, health_state)
+        let prometheus_handle = crate::metrics::init_metrics();
+        crate::routes::create_router(pool, None, &[], 60, health_state, prometheus_handle)
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -685,10 +672,10 @@ mod tests {
     /// Test that health endpoint returns 503 when DB is unreachable
     #[tokio::test]
     async fn health_db_unreachable_returns_503() {
-        // Create a pool that will fail to connect
         let pool = PgPool::connect_lazy("postgres://invalid-host:5432/invalid_db").unwrap();
         let health_state = Arc::new(HealthState::new(60));
-        let app = crate::routes::create_router(pool, None, &[], 60, health_state);
+        let prometheus_handle = crate::metrics::init_metrics();
+        let app = crate::routes::create_router(pool, None, &[], 60, health_state, prometheus_handle);
 
         let response = app
             .oneshot(

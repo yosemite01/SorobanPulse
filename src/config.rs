@@ -3,6 +3,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use url::Url;
 
+/// Deployment environment — controls strictness of defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Environment {
+    Development,
+    Staging,
+    Production,
+}
+
+impl Environment {
+    fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "production" | "prod" => Self::Production,
+            "staging" | "stage" => Self::Staging,
+            _ => Self::Development,
+        }
+    }
+
+    /// Returns `true` for staging and production.
+    pub fn is_production_like(&self) -> bool {
+        matches!(self, Self::Staging | Self::Production)
+    }
+}
+
 /// Shared state for health checks, accessible between the indexer and HTTP handlers
 #[derive(Clone)]
 pub struct HealthState {
@@ -68,13 +91,15 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub rate_limit_per_minute: u32,
     pub indexer_lag_warn_threshold: u64,
+    pub indexer_stall_timeout_secs: u64,
+    pub environment: Environment,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            database_url: "postgres://localhost/unused".to_string(),
-            stellar_rpc_url: "http://localhost".to_string(),
+            database_url: "postgres://localhost/soroban_pulse".to_string(),
+            stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
             start_ledger: 0,
             start_ledger_fallback: false,
             port: 3000,
@@ -86,8 +111,9 @@ impl Default for Config {
             rpc_request_timeout_secs: 30,
             allowed_origins: vec!["*".to_string()],
             rate_limit_per_minute: 60,
-            indexer_stall_timeout_secs: 60,
             indexer_lag_warn_threshold: 100,
+            indexer_stall_timeout_secs: 60,
+            environment: Environment::Development,
         }
     }
 }
@@ -115,19 +141,16 @@ fn validate_rpc_url(raw: &str) -> String {
             || host == "127.0.0.1"
             || host == "::1"
             || host.ends_with(".local");
-        let is_private = {
-            // Reject RFC-1918 / link-local ranges by prefix
-            host.starts_with("10.")
-                || host.starts_with("192.168.")
-                || host.starts_with("169.254.")
-                || (host.starts_with("172.") && {
-                    host.split('.')
-                        .nth(1)
-                        .and_then(|o| o.parse::<u8>().ok())
-                        .map(|o| (16..=31).contains(&o))
-                        .unwrap_or(false)
-                })
-        };
+        let is_private = host.starts_with("10.")
+            || host.starts_with("192.168.")
+            || host.starts_with("169.254.")
+            || (host.starts_with("172.") && {
+                host.split('.')
+                    .nth(1)
+                    .and_then(|o| o.parse::<u8>().ok())
+                    .map(|o| (16..=31).contains(&o))
+                    .unwrap_or(false)
+            });
         if is_loopback || is_private {
             panic!(
                 "STELLAR_RPC_URL points to a non-routable host '{host}' — \
@@ -143,14 +166,27 @@ fn validate_rpc_url(raw: &str) -> String {
     safe.to_string()
 }
 
+/// Read DATABASE_URL from DATABASE_URL_FILE if set, otherwise fall back to DATABASE_URL.
+fn resolve_database_url() -> String {
+    if let Ok(file_path) = env::var("DATABASE_URL_FILE") {
+        std::fs::read_to_string(&file_path)
+            .unwrap_or_else(|e| panic!("Failed to read DATABASE_URL_FILE at '{file_path}': {e}"))
+            .trim()
+            .to_string()
+    } else {
+        env::var("DATABASE_URL").expect("DATABASE_URL must be set (or DATABASE_URL_FILE)")
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
+        let environment = Environment::from_str(
+            &env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
+        );
+
         let behind_proxy = env::var("BEHIND_PROXY")
             .ok()
-            .map(|v| {
-                let v = v.to_ascii_lowercase();
-                matches!(v.as_str(), "true" | "1" | "yes" | "y")
-            })
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
             .unwrap_or(false);
 
         let start_ledger = env::var("START_LEDGER")
@@ -160,10 +196,7 @@ impl Config {
 
         let start_ledger_fallback = env::var("START_LEDGER_FALLBACK")
             .ok()
-            .map(|v| {
-                let v = v.to_ascii_lowercase();
-                matches!(v.as_str(), "true" | "1" | "yes" | "y")
-            })
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
             .unwrap_or(false);
 
         let port = env::var("PORT")
@@ -171,8 +204,25 @@ impl Config {
             .parse()
             .expect("PORT must be a number");
 
+        // In production-like environments, CORS wildcard is not allowed.
+        let allowed_origins: Vec<String> = env::var("ALLOWED_ORIGINS")
+            .unwrap_or_else(|_| "*".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if environment.is_production_like()
+            && allowed_origins.iter().any(|o| o == "*")
+        {
+            panic!(
+                "ALLOWED_ORIGINS=* is not permitted in {environment:?} — \
+                 set explicit origins or use ENVIRONMENT=development"
+            );
+        }
+
         Self {
-            database_url: env::var("DATABASE_URL").expect("DATABASE_URL must be set"),
+            database_url: resolve_database_url(),
             stellar_rpc_url: validate_rpc_url(
                 &env::var("STELLAR_RPC_URL")
                     .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
@@ -198,12 +248,7 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .expect("RPC_REQUEST_TIMEOUT_SECS must be a number"),
-            allowed_origins: env::var("ALLOWED_ORIGINS")
-                .unwrap_or_else(|_| "*".to_string())
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            allowed_origins,
             rate_limit_per_minute: env::var("RATE_LIMIT_PER_MINUTE")
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
@@ -212,27 +257,11 @@ impl Config {
                 .unwrap_or_else(|_| "100".to_string())
                 .parse()
                 .expect("INDEXER_LAG_WARN_THRESHOLD must be a number"),
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            database_url: "postgres://localhost/soroban_pulse".to_string(),
-            stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
-            start_ledger: 0,
-            start_ledger_fallback: false,
-            port: 8080,
-            api_key: None,
-            db_max_connections: 10,
-            db_min_connections: 1,
-            behind_proxy: false,
-            rpc_connect_timeout_secs: 5,
-            rpc_request_timeout_secs: 30,
-            allowed_origins: vec!["*".to_string()],
-            rate_limit_per_minute: 60,
-            indexer_lag_warn_threshold: 100,
+            indexer_stall_timeout_secs: env::var("INDEXER_STALL_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .expect("INDEXER_STALL_TIMEOUT_SECS must be a number"),
+            environment,
         }
     }
 }

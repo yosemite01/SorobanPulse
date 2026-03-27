@@ -1,3 +1,10 @@
+#![deny(clippy::all, clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions, // e.g. AppError, AppState — idiomatic in Rust
+    clippy::missing_errors_doc,      // internal handlers; not a public library
+    clippy::missing_panics_doc,      // panics only on misconfiguration at startup
+    clippy::wildcard_imports,        // used sparingly in test modules only
+)]
 mod config;
 mod db;
 mod error;
@@ -90,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Migrations applied successfully");
     info!(url = %config.stellar_rpc_url, "Soroban RPC URL");
+    info!(environment = ?config.environment, "Running environment");
 
     // Create shared health state for indexer and HTTP handlers
     let health_state = Arc::new(config::HealthState::new(config.indexer_stall_timeout_secs));
@@ -124,7 +132,14 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
-    let router = routes::create_router(pool, config.api_key, &config.allowed_origins, config.rate_limit_per_minute, prometheus_handle);
+    let router = routes::create_router(
+        pool,
+        config.api_key,
+        &config.allowed_origins,
+        config.rate_limit_per_minute,
+        health_state,
+        prometheus_handle,
+    );
 
     info!(addr = %addr, "Soroban Pulse listening");
 

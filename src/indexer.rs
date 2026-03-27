@@ -269,7 +269,14 @@ impl Indexer {
                         }
                     }
                     Err(e) => {
-                        warn!(tx_hash = %event.tx_hash, error = %e, "Failed to store event");
+                        warn!(
+                            tx_hash = %event.tx_hash,
+                            contract_id = %event.contract_id,
+                            ledger = event.ledger,
+                            event_type = %event.event_type,
+                            error = %e,
+                            "Failed to store event",
+                        );
                     }
                 }
             }
@@ -301,14 +308,27 @@ impl Indexer {
         let ledger = match i64::try_from(event.ledger) {
             Ok(v) => v,
             Err(_) => {
-                error!(ledger = event.ledger, "Ledger number overflows i64, skipping event");
+                error!(
+                    tx_hash = %event.tx_hash,
+                    contract_id = %event.contract_id,
+                    ledger = event.ledger,
+                    event_type = %event.event_type,
+                    "Ledger number overflows i64, skipping event",
+                );
                 return Ok(0);
             }
         };
         let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .map_err(|_| {
-                warn!(raw = %event.ledger_closed_at, "Unparseable ledger_closed_at, skipping event");
+                warn!(
+                    tx_hash = %event.tx_hash,
+                    contract_id = %event.contract_id,
+                    ledger = event.ledger,
+                    event_type = %event.event_type,
+                    raw = %event.ledger_closed_at,
+                    "Unparseable ledger_closed_at, skipping event",
+                );
                 anyhow::anyhow!("Unparseable ledger_closed_at: {}", event.ledger_closed_at)
             })?;
 

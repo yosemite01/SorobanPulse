@@ -24,6 +24,9 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
     pub exact_count: Option<bool>,
     pub fields: Option<String>,
+    pub event_type: Option<String>,
+    pub from_ledger: Option<i64>,
+    pub to_ledger: Option<i64>,
 }
 
 impl PaginationParams {

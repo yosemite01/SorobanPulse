@@ -113,23 +113,67 @@ pub async fn get_events(
     State(state): State<crate::routes::AppState>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
-    let pool = &state.pool;
+    // Validate event_type
+    if let Some(ref et) = params.event_type {
+        if !["contract", "diagnostic", "system"].contains(&et.as_str()) {
+            return Err(AppError::Validation(
+                "event_type must be one of: contract, diagnostic, system".to_string(),
+            ));
+        }
+    }
+
+    // Validate ledger range
+    if let (Some(from), Some(to)) = (params.from_ledger, params.to_ledger) {
+        if from > to {
+            return Err(AppError::Validation(
+                "from_ledger must be <= to_ledger".to_string(),
+            ));
+        }
+    }
+
     let limit = params.limit();
     let offset = params.offset();
     let exact = params.exact_count.unwrap_or(false);
-
     let columns = params.columns();
 
+    // Build WHERE clause dynamically
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_idx: i32 = 1;
+
+    if params.event_type.is_some() {
+        conditions.push(format!("event_type = ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.from_ledger.is_some() {
+        conditions.push(format!("ledger >= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.to_ledger.is_some() {
+        conditions.push(format!("ledger <= ${bind_idx}"));
+        bind_idx += 1;
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
     let query_str = format!(
-        "SELECT {} FROM events ORDER BY ledger DESC LIMIT $1 OFFSET $2",
-        columns.join(", ")
+        "SELECT {} FROM events {} ORDER BY ledger DESC LIMIT ${} OFFSET ${}",
+        columns.join(", "),
+        where_clause,
+        bind_idx,
+        bind_idx + 1,
     );
 
-    let rows = sqlx::query(&query_str)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&state.pool)
-        .await?;
+    let mut q = sqlx::query(&query_str);
+    if let Some(ref et) = params.event_type { q = q.bind(et); }
+    if let Some(fl) = params.from_ledger { q = q.bind(fl); }
+    if let Some(tl) = params.to_ledger { q = q.bind(tl); }
+    q = q.bind(limit).bind(offset);
+
+    let rows = q.fetch_all(&state.pool).await?;
 
     let mut events = Vec::new();
     for row in rows {
@@ -151,17 +195,29 @@ pub async fn get_events(
     }
 
     let (total, approximate): (i64, bool) = if exact {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
-            .fetch_one(&state.pool)
-            .await?;
+        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+        if let Some(ref et) = params.event_type { cq = cq.bind(et); }
+        if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
+        if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
+        let count = cq.fetch_one(&state.pool).await?;
         (count, false)
-    } else {
+    } else if where_clause.is_empty() {
         let count: i64 = sqlx::query_scalar(
             "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
         )
         .fetch_one(&state.pool)
         .await?;
         (count, true)
+    } else {
+        // Filtered queries always use exact count — approximate stats don't apply to subsets
+        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+        if let Some(ref et) = params.event_type { cq = cq.bind(et); }
+        if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
+        if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
+        let count = cq.fetch_one(&state.pool).await?;
+        (count, false)
     };
 
     Ok(Json(json!({

@@ -16,6 +16,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -35,4 +40,16 @@ jobs:
         run: cargo build
 
       - name: Test
-        run: cargo test -- --skip handlers::tests
+        run: cargo test
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate coverage report
+        run: cargo tarpaulin --out Xml --output-dir ./coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage/cobertura.xml
+          fail_ci_if_error: true

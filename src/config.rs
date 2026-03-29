@@ -312,3 +312,97 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    #[test]
+    fn test_environment_from_str() {
+        assert_eq!(Environment::from_str("production"), Environment::Production);
+        assert_eq!(Environment::from_str("prod"), Environment::Production);
+        assert_eq!(Environment::from_str("staging"), Environment::Staging);
+        assert_eq!(Environment::from_str("stage"), Environment::Staging);
+        assert_eq!(Environment::from_str("development"), Environment::Development);
+        assert_eq!(Environment::from_str("dev"), Environment::Development);
+        assert_eq!(Environment::from_str("unknown"), Environment::Development);
+    }
+
+    #[test]
+    fn test_environment_is_production_like() {
+        assert!(!Environment::Development.is_production_like());
+        assert!(Environment::Staging.is_production_like());
+        assert!(Environment::Production.is_production_like());
+    }
+
+    #[test]
+    fn test_indexer_state_new() {
+        let state = IndexerState::new();
+        assert_eq!(state.current_ledger.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(state.latest_ledger.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(state.started_at > 0);
+    }
+
+    #[test]
+    fn test_indexer_state_uptime() {
+        let state = IndexerState::new();
+        let uptime1 = state.uptime_secs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let uptime2 = state.uptime_secs();
+        assert!(uptime2 >= uptime1);
+    }
+
+    #[test]
+    fn test_health_state_new() {
+        let health_state = HealthState::new(60);
+        assert_eq!(health_state.indexer_stall_timeout_secs, 60);
+        assert_eq!(health_state.last_indexer_poll.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_health_state_update_and_check() {
+        let health_state = HealthState::new(60);
+        
+        // Initially stalled (no poll ever)
+        assert_eq!(health_state.is_indexer_stalled(), Some(0));
+        
+        // Update poll
+        health_state.update_last_poll();
+        assert_eq!(health_state.is_indexer_stalled(), None);
+        
+        // Simulate time passing (can't easily test actual time passage in unit tests)
+        // But we can test the logic with a very short timeout
+        let health_state_short = HealthState::new(0);
+        health_state_short.update_last_poll();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(health_state_short.is_indexer_stalled().is_some());
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert_eq!(config.database_url, "postgres://localhost/soroban_pulse");
+        assert_eq!(config.stellar_rpc_url, "https://soroban-testnet.stellar.org");
+        assert_eq!(config.port, 3000);
+        assert_eq!(config.start_ledger, 0);
+        assert!(!config.start_ledger_fallback);
+        assert_eq!(config.environment, Environment::Development);
+    }
+
+    #[test]
+    fn test_config_safe_db_url() {
+        let mut config = Config::default();
+        config.database_url = "postgres://user:password@localhost/db".to_string();
+        let safe_url = config.safe_db_url();
+        assert!(!safe_url.contains("password"));
+        assert!(safe_url.contains("localhost"));
+    }
+
+    #[test]
+    fn test_config_safe_db_url_unparseable() {
+        let mut config = Config::default();
+        config.database_url = "not-a-url".to_string();
+        assert_eq!(config.safe_db_url(), "<unparseable>");
+    }
+}

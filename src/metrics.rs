@@ -40,3 +40,65 @@ pub fn record_rpc_error() {
 pub fn record_http_request_duration(duration: std::time::Duration, method: &str, route: &str, status: &str) {
     m::histogram!("soroban_pulse_http_request_duration_seconds", duration.as_secs_f64(), "method" => method.to_string(), "route" => route.to_string(), "status" => status.to_string());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_init_metrics() {
+        let handle = init_metrics();
+        // The handle should be valid - we can't easily test the internal state
+        // but we can at least verify it doesn't panic
+        assert!(true);
+    }
+
+    #[test]
+    fn test_record_events_indexed() {
+        // This should not panic
+        record_events_indexed(42);
+        record_events_indexed(0);
+        assert!(true);
+    }
+
+    #[test]
+    fn test_update_current_ledger() {
+        // This should not panic
+        update_current_ledger(12345);
+        update_current_ledger(0);
+        assert!(true);
+    }
+
+    #[test]
+    fn test_update_latest_ledger() {
+        // This should not panic
+        update_latest_ledger(67890);
+        update_latest_ledger(0);
+        assert!(true);
+    }
+
+    #[test]
+    fn test_update_indexer_lag() {
+        // This should not panic
+        update_indexer_lag(100);
+        update_indexer_lag(0);
+        assert!(true);
+    }
+
+    #[test]
+    fn test_record_rpc_error() {
+        // This should not panic
+        record_rpc_error();
+        assert!(true);
+    }
+
+    #[test]
+    fn test_record_http_request_duration() {
+        // This should not panic
+        let duration = Duration::from_millis(150);
+        record_http_request_duration(duration, "GET", "/events", "200");
+        record_http_request_duration(Duration::ZERO, "POST", "/health", "500");
+        assert!(true);
+    }
+}
